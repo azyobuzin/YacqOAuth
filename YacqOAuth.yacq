@@ -1,0 +1,185 @@
+; YacqOAuth
+; Copyright © 2012 azyobuzin
+;
+; Permission is hereby granted, free of charge, to any person obtaining a copy
+; of this software and associated documentation files (the "Software"), to deal
+; in the Software without restriction, including without limitation the rights
+; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+; copies of the Software, and to permit persons to whom the Software is
+; furnished to do so, subject to the following conditions:
+; 
+; The above copyright notice and this permission notice shall be included in
+; all copies or substantial portions of the Software.
+; 
+; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+; THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+; THE SOFTWARE.
+
+(load "cts:System.Collections.Generic")
+
+(def HMAC-SHA1 "HMAC-SHA1")
+(def RSA-SHA1 "RSA-SHA1")
+(def PLAINTEXT "PLAINTEXT")
+
+(def oauthVersion "1.0")
+
+(def percentEncode (\ [text:String]
+	String.(Join ""
+		text.(Select (\ [c]
+			"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-._~"
+			.(Contains c).(cond
+				c.(ToString)
+				String.(Join ""
+					Encoding.UTF8.(GetBytes c.(ToString))
+					.(Select (\ [b] (+ "%" b.(ToString "X"))))
+					.(ToArray)
+				)
+			)
+		)).(ToArray)
+	)
+))
+
+(def normalizeUri (\ [uri:Uri]
+	(+
+		uri.Scheme
+		"://"
+		uri.Host
+		(|
+			(&& (== uri.Scheme "http") (== uri.Port 80))
+			(&& (== uri.Scheme "https") (== uri.Port 443))
+		).(cond
+			""
+			(+ ":" uri.Port)
+		)
+		uri.AbsolutePath
+	)
+))
+
+(def normalizeParameters (\ [params:IEnumerable.[KeyValuePair.[String String]]]
+	String.(Join "&"
+		params.(OrderBy (\ [kvp] kvp.Key))
+			.(ThenBy (\ [kvp] kvp.Value))
+			.(Select (\ [kvp] "\$(percentEncode kvp.Key)=\$(percentEncode kvp.Value)"))
+			.(ToArray)
+	)
+))
+
+(def parseWwwFormUrlencoded (\ [source:String]
+	source.(TrimStart '?')
+		.(Split ['&'] (type "System.StringSplitOptions").RemoveEmptyEntries)
+		.(Select (\ [_] _.(Split ['='] 2 (type "System.StringSplitOptions").None).(let s
+			KeyValuePair.[String String].(new
+				Uri.(UnescapeDataString s.[0])
+				(> s.Length 1).(cond Uri.(UnescapeDataString s.[1]) "")
+			)
+		)))
+))
+
+(def toWwwFormUrlencoded (\ [source:IEnumerable.[KeyValuePair.[String String]]]
+	String.(Join "&"
+		source
+		.(Select (\ [kvp] (+ Uri.(EscapeDataString kvp.Key) "=" Uri.(EscapeDataString kvp.Value))))
+		.(ToArray)
+	)
+))
+
+(def timestamp (\
+	(-
+		DateTime.UtcNow
+		DateTime.(new 1970 1 1 0 0 0 (type "System.DateTimeKind").Utc)
+	).TotalSeconds.(ToString "0")
+))
+
+(def nonce (\
+	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".(let s
+		String.(new
+			Enumerable.(Repeat Random.(new) 42)
+				.(Select (\ [rnd] s.[rnd.(Next s.Length)]))
+				.(ToArray)
+		)
+	)
+))
+
+(def signParametersBase (\ [realm:String consumerKey:String token:String signatureMethod:String timestamp:String nonce:String callback:String verifier:String]
+	Dictionary.[String String].(new).(let dic
+		String.(IsNullOrEmpty realm).(else dic.(Add "realm" realm))
+		dic.(Add "oauth_consumer_key" consumerKey)
+		String.(IsNullOrEmpty token).(else dic.(Add "oauth_token" token))
+		dic.(Add "oauth_signature_method" signatureMethod)
+		String.(IsNullOrEmpty timestamp).(else dic.(Add "oauth_timestamp" timestamp))
+		String.(IsNullOrEmpty nonce).(else dic.(Add "oauth_nonce" nonce))
+		dic.(Add "oauth_version" oauthVersion)
+		String.(IsNullOrEmpty callback).(else dic.(Add "oauth_callback" callback))
+		String.(IsNullOrEmpty verifier).(else dic.(Add "oauth_verifier" verifier))
+		
+		dic
+	)
+))
+
+(def signatureBase (\ [httpMethod:String uri:Uri signParams:IEnumerable.[KeyValuePair.[String String]] params:IEnumerable.[KeyValuePair.[String String]]]
+	(+
+		httpMethod.(ToUpper)
+		"&"
+		(percentEncode (normalizeUri uri))
+		"&"
+		(percentEncode (normalizeParameters
+			signParams.(Concat
+				(?? params Dictionary.[String String].(new))
+				.(Concat (parseWwwFormUrlencoded uri.Query))
+			)
+		))
+	)
+))
+
+(def signatureKey (\ [consumerSecret:String tokenSecret:String]
+	"\$(percentEncode consumerSecret)&\$(percentEncode tokenSecret)"
+))
+
+(def signature (\ [baseString:String key:String signatureMethod:String]
+	signatureMethod.(case
+		HMAC-SHA1
+			(type "System.Security.Cryptography.HMACSHA1").(new Encoding.ASCII.(GetBytes key))
+			.(use hmacsha1 Convert.(ToBase64String hmacsha1.(ComputeHash Encoding.ASCII.(GetBytes baseString))))
+		PLAINTEXT
+			key
+		($
+			(type "System.NotImplementedException").(new).(throw)
+			"" ;「System.ArgumentException: すべての case 本体と既定の本体は同じ型でなければなりません。」の対策
+		)
+	)
+))
+
+(def signParameters (\ [httpMethod:String uri:Uri realm:String consumerKey:String consumerSecret:String token:String tokenSecret:String signatureMethod:String callback:String verifier:String params:IEnumerable.[KeyValuePair.[String String]]]
+	(== signatureMethod PLAINTEXT).(let isPlainText
+		(signParametersBase realm consumerKey token signatureMethod isPlainText.(cond "" (timestamp)) isPlainText.(cond "" (nonce)) callback verifier).(let signParams
+			signParams.(Add "oauth_signature" (signature
+				(signatureBase httpMethod uri signParams params)
+				(signatureKey consumerSecret tokenSecret)
+				signatureMethod
+			))
+			
+			signParams
+		)
+	)
+))
+
+(def createAuthorizationHeader (\ [httpMethod:String uri:Uri realm:String consumerKey:String consumerSecret:String token:String tokenSecret:String signatureMethod:String callback:String verifier:String params:IEnumerable.[KeyValuePair.[String String]]]
+	(+
+		"OAuth "
+		String.(Join ","
+			(signParameters httpMethod uri realm consumerKey consumerSecret token tokenSecret signatureMethod callback verifier params)
+			.(Select (\ [kvp] '\$(percentEncode kvp.Key)="\$(percentEncode kvp.Value)"'))
+			.(ToArray)
+		)
+	)
+))
+
+(def createAuthorizationQuery (\ [httpMethod:String uri:Uri realm:String consumerKey:String consumerSecret:String token:String tokenSecret:String signatureMethod:String callback:String verifier:String params:IEnumerable.[KeyValuePair.[String String]]]
+	(toWwwFormUrlencoded
+		(signParameters httpMethod uri realm consumerKey consumerSecret token tokenSecret signatureMethod callback verifier params)
+	)
+))
