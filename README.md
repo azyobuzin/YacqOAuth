@@ -1,6 +1,8 @@
 # YacqOAuth #
 [OAuth 1.0](http://oauth.net/core/1.0a/) Client Implemented in [YACQ](http://www.yacq.net/)
 
+Tested in Twitter and Tumblr.
+
 ## Example ##
 	(load "YacqOAuth")
 	(load "cts:System.Net")
