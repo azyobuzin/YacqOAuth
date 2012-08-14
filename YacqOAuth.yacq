@@ -48,7 +48,7 @@
 		uri.Scheme
 		"://"
 		uri.Host
-		(|
+		(||
 			(&& (== uri.Scheme "http") (== uri.Port 80))
 			(&& (== uri.Scheme "https") (== uri.Port 443))
 		).(cond
